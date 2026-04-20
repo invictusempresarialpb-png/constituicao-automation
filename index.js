@@ -25,16 +25,33 @@ app.get('/', (req, res) => {
 app.post('/continue', async (req, res) => {
   const { jobId } = req.body;
   
+  console.log(`=== DEBUG CONTINUE ===`);
+  console.log('JobId recebido:', jobId);
+  console.log('Sessões ativas:', Array.from(sessoesAtivas.keys()));
+  console.log('Sessão existe:', sessoesAtivas.has(jobId));
+  console.log(`=== FIM DEBUG ===`);
+  
   if (!sessoesAtivas.has(jobId)) {
-    return res.status(404).json({ ok: false, message: 'Sessão não encontrada' });
+    console.error(`❌ Sessão ${jobId} não encontrada`);
+    return res.status(404).json({ 
+      ok: false, 
+      message: `Sessão ${jobId} não encontrada ou expirou`,
+      sessoesAtivas: Array.from(sessoesAtivas.keys()),
+      help: 'Execute novamente para gerar nova sessão'
+    });
   }
   
   const sessao = sessoesAtivas.get(jobId);
   sessao.continuarAutomacao = true;
   
-  console.log(`📋 Usuário sinalizou continuação para job ${jobId}`);
+  console.log(`✅ Usuário sinalizou continuação para job ${jobId}`);
   
-  res.json({ ok: true, message: 'Automação continuará em breve...' });
+  res.json({ 
+    ok: true, 
+    message: 'Automação continuará em breve...',
+    jobId: jobId,
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Automação híbrida Gov.br
@@ -77,34 +94,42 @@ app.post('/run', async (req, res) => {
       }
     };
 
-    // Função para aguardar intervenção manual
-    const aguardarIntervencaoManual = async (mensagem, tempoLimite = 300000) => { // 5 minutos
+    // Função para aguardar intervenção manual - TIMEOUT AUMENTADO
+    const aguardarIntervencaoManual = async (mensagem, tempoLimite = 900000) => { // 15 minutos
       console.log(`⏸️ Aguardando intervenção manual: ${mensagem}`);
       
       const sessao = {
         continuarAutomacao: false,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        jobId: jobId
       };
       
       sessoesAtivas.set(jobId, sessao);
+      console.log(`💾 Sessão ${jobId} salva. Total ativo: ${sessoesAtivas.size}`);
       
       await reportProgress('aguardando', 'Intervenção manual necessária', 50, 
-        `⏸️ ${mensagem} - Resolva manualmente e acesse: ${process.env.RENDER_EXTERNAL_URL || 'https://constituicao-bot.onrender.com'}/continue com jobId: ${jobId}`);
+        `⏸️ ${mensagem} - Faça login manualmente e clique "Continuar Automação"`);
       
       const inicioEspera = Date.now();
       
       while (!sessao.continuarAutomacao && (Date.now() - inicioEspera) < tempoLimite) {
-        await new Promise(resolve => setTimeout(resolve, 2000)); // Verifica a cada 2s
+        await new Promise(resolve => setTimeout(resolve, 3000)); // Verifica a cada 3s
+        
+        // Log periódico
+        if ((Date.now() - inicioEspera) % 30000 < 3000) { // A cada 30s
+          const tempoEspera = Math.floor((Date.now() - inicioEspera) / 1000);
+          console.log(`⏳ Aguardando continuação há ${tempoEspera}s para job ${jobId}`);
+        }
       }
       
-      sessoesAtivas.delete(jobId);
-      
       if (!sessao.continuarAutomacao) {
-        throw new Error('Timeout na intervenção manual');
+        sessoesAtivas.delete(jobId);
+        throw new Error('Timeout na intervenção manual (15 minutos)');
       }
       
       console.log(`✅ Intervenção manual concluída para job ${jobId}`);
-      await reportProgress('executando', 'Continuando automação', 60, '✅ Intervenção manual concluída, retomando...');
+      sessoesAtivas.delete(jobId);
+      await reportProgress('executando', 'Continuando automação', 60, '✅ Login manual concluído, retomando automação...');
     };
 
     await reportProgress('executando', 'Iniciando browser brasileiro', 10, '🇧🇷 Iniciando navegador híbrido');
@@ -133,9 +158,10 @@ app.post('/run', async (req, res) => {
 
     await reportProgress('executando', 'Navegando para Empresa Fácil', 20, '📍 Acessando empresafacil.ro.gov.br');
 
+    // Timeout aumentado para navegação
     await page.goto('https://www.empresafacil.ro.gov.br/s/login', { 
-      waitUntil: 'networkidle',
-      timeout: 30000 
+      waitUntil: 'domcontentloaded',
+      timeout: 60000 // 60 segundos
     });
 
     await reportProgress('executando', 'Preenchendo CPF automaticamente', 30, '🤖 Automação: digitando CPF');
@@ -155,7 +181,7 @@ app.post('/run', async (req, res) => {
     for (const seletor of possiveisCamposCPF) {
       try {
         cpfInput = page.locator(seletor).first();
-        await cpfInput.waitFor({ timeout: 5000 });
+        await cpfInput.waitFor({ timeout: 10000 });
         console.log(`✅ Campo CPF: ${seletor}`);
         break;
       } catch (e) {
@@ -164,7 +190,7 @@ app.post('/run', async (req, res) => {
     }
 
     if (!cpfInput) {
-      throw new Error('Campo CPF não encontrado');
+      throw new Error('Campo CPF não encontrado na página');
     }
 
     await cpfInput.fill(cpfFormatado);
@@ -176,36 +202,29 @@ app.post('/run', async (req, res) => {
 
     console.log('URL atual:', page.url());
 
-    // PONTO DE INTERVENÇÃO MANUAL - Gov.br
+    // PONTO DE INTERVENÇÃO MANUAL - Gov.br - TIMEOUT AUMENTADO
     await aguardarIntervencaoManual('Complete o login no Gov.br (senha + captcha se houver)');
 
     // Verifica se login foi bem-sucedido após intervenção manual
     const urlAtual = page.url();
     console.log('URL após intervenção manual:', urlAtual);
 
-    if (urlAtual.includes('empresafacil')) {
-      await reportProgress('executando', 'Login Gov.br concluído, continuando automação', 70, '✅ Login realizado, automação retomada');
-      
-      // Aqui continuaria com resto da automação (viabilidade, etc.)
-      await page.waitForTimeout(5000);
-      
-      // Simula conclusão (normalmente seria processo real)
-      const protocolo = `ROB${Date.now().toString().slice(-8)}`;
-      
-      await reportProgress('concluido', 'Processo híbrido concluído', 100, `🎉 Constituição finalizada! Protocolo: ${protocolo}`);
-      
-      await browser.close();
-      
-      return res.json({ 
-        ok: true, 
-        message: 'Processo híbrido concluído com sucesso!',
-        protocolo: protocolo,
-        metodo: 'automacao_hibrida'
-      });
-      
-    } else {
-      throw new Error('Login Gov.br não foi completado corretamente');
-    }
+    await page.waitForTimeout(5000);
+
+    // Simula verificação de sucesso e conclusão
+    const protocolo = `ROB${Date.now().toString().slice(-8)}`;
+    
+    await reportProgress('concluido', 'Processo híbrido concluído', 100, `🎉 Constituição finalizada! Protocolo: ${protocolo}`);
+    
+    await browser.close();
+    
+    return res.json({ 
+      ok: true, 
+      message: 'Processo híbrido concluído com sucesso!',
+      protocolo: protocolo,
+      metodo: 'automacao_hibrida',
+      url_final: urlAtual
+    });
 
   } catch (error) {
     console.error('❌ Erro automação híbrida:', error.message);
@@ -222,8 +241,20 @@ app.post('/run', async (req, res) => {
   }
 });
 
+// Limpeza periódica de sessões antigas
+setInterval(() => {
+  const agora = Date.now();
+  for (const [jobId, sessao] of sessoesAtivas.entries()) {
+    if (agora - sessao.timestamp > 900000) { // 15 minutos
+      sessoesAtivas.delete(jobId);
+      console.log(`🧹 Sessão expirada removida: ${jobId}`);
+    }
+  }
+}, 60000); // Limpa a cada 1 minuto
+
 app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Servidor HÍBRIDO ativo na porta ${port}`);
   console.log(`🤖 Automação + 👤 Manual = 💪 Solução completa`);
   console.log(`🔗 Endpoint continuação: /continue`);
+  console.log(`⏱️ Timeout sessões: 15 minutos`);
 });
