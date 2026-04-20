@@ -1,12 +1,14 @@
 {
   "name": "constituicao-automation",
-  "version": "1.0.0", 
+  "version": "1.0.0",
+  "description": "Automação para constituição empresarial",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
+    "playwright": "1.40.0",
     "cors": "^2.8.5"
   }
 }
