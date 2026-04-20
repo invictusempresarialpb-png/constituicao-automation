@@ -106,14 +106,50 @@ app.post('/run', async (req, res) => {
       timeout: 30000 
     });
 
-    await reportProgress('executando', 'Preenchendo CPF', 40, '⌨️ Digitando CPF');
+    await reportProgress('executando', 'Inspecionando página', 35, '🔍 Verificando estrutura da página');
+
+    // Debug: vê o que tem na página
+    console.log('=== PÁGINA CARREGADA ===');
+    console.log('Title:', await page.title());
+    console.log('URL:', page.url());
+    console.log('Inputs encontrados:', await page.$$eval('input', inputs => 
+      inputs.map(i => ({ name: i.name, placeholder: i.placeholder, type: i.type, id: i.id }))
+    ));
+    console.log('=== FIM DEBUG ===');
 
     const cpfLimpo = credenciais.cpf.replace(/\D/g, '');
     const cpfFormatado = cpfLimpo.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
     
     console.log(`CPF: ${cpfFormatado.replace(/\d(?=\d{4})/g, '*')}`);
-    
-    await page.fill('input[name="username"]', cpfFormatado);
+
+    // Tenta múltiplos seletores para CPF
+    const possiveisCamposCPF = [
+      'input[name="username"]',
+      'input[placeholder*="CPF"]', 
+      'input[id*="cpf"]',
+      'input[type="text"]',
+      '#username',
+      '.cpf-input'
+    ];
+
+    let cpfInput = null;
+    for (const seletor of possiveisCamposCPF) {
+      try {
+        cpfInput = page.locator(seletor).first();
+        await cpfInput.waitFor({ timeout: 5000 });
+        console.log(`✅ Campo CPF encontrado com seletor: ${seletor}`);
+        break;
+      } catch (e) {
+        console.log(`❌ Seletor falhou: ${seletor}`);
+      }
+    }
+
+    if (!cpfInput) {
+      throw new Error('Nenhum campo de CPF encontrado na página');
+    }
+
+    await reportProgress('executando', 'Preenchendo CPF', 40, '⌨️ Digitando CPF');
+    await cpfInput.fill(cpfFormatado);
     await page.waitForTimeout(2000);
     await page.click('button[type="submit"]');
     
