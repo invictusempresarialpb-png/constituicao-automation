@@ -21,12 +21,33 @@ app.get('/', (req, res) => {
   });
 });
 
-// Endpoint para continuar automação após intervenção manual
+// GET para teste simples do endpoint continue
+app.get('/continue', (req, res) => {
+  const { jobId } = req.query;
+  
+  console.log(`=== TESTE GET CONTINUE ===`);
+  console.log('JobId via query:', jobId);
+  console.log('Sessões ativas:', Array.from(sessoesAtivas.keys()));
+  console.log(`=== FIM TESTE ===`);
+  
+  res.json({
+    ok: true,
+    message: 'Endpoint /continue funcionando via GET',
+    method: 'GET',
+    jobId: jobId || 'não fornecido',
+    timestamp: new Date().toISOString(),
+    sessoesAtivas: Array.from(sessoesAtivas.keys()),
+    help: 'Para usar POST: envie {"jobId": "..."} no body'
+  });
+});
+
+// Endpoint POST para continuar automação após intervenção manual
 app.post('/continue', async (req, res) => {
   const { jobId } = req.body;
   
-  console.log(`=== DEBUG CONTINUE ===`);
+  console.log(`=== DEBUG CONTINUE POST ===`);
   console.log('JobId recebido:', jobId);
+  console.log('Body completo:', req.body);
   console.log('Sessões ativas:', Array.from(sessoesAtivas.keys()));
   console.log('Sessão existe:', sessoesAtivas.has(jobId));
   console.log(`=== FIM DEBUG ===`);
@@ -255,6 +276,6 @@ setInterval(() => {
 app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Servidor HÍBRIDO ativo na porta ${port}`);
   console.log(`🤖 Automação + 👤 Manual = 💪 Solução completa`);
-  console.log(`🔗 Endpoint continuação: /continue`);
+  console.log(`🔗 Endpoint continuação: GET e POST /continue`);
   console.log(`⏱️ Timeout sessões: 15 minutos`);
 });
