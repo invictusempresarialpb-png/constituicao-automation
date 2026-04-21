@@ -8,14 +8,22 @@ const port = process.env.PORT || 3001;
 
 const HEADLESS = process.env.HEADLESS !== 'false';
 
-app.use(cors());
-app.use(express.json());
+// CORS totalmente aberto para simplificar testes locais (file://)
+app.use(
+  cors({
+    origin: true, // reflete qualquer Origin, inclusive null (file://)
+    credentials: false,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  }),
+);
+app.options('*', cors());
 
-// ---------- Armazenamento de jobs em memória ----------
-// Para produção robusta, troque por Redis. Por enquanto, Map basta.
+app.use(express.json({ limit: '1mb' }));
+
+// ---------- Jobs em memória ----------
 const jobs = new Map();
 
-// Limpa jobs concluídos com mais de 30 minutos para não vazar memória
 setInterval(() => {
   const agora = Date.now();
   for (const [id, job] of jobs.entries()) {
@@ -29,7 +37,7 @@ function criarJob() {
   const id = crypto.randomUUID();
   const job = {
     id,
-    status: 'pending',          // pending | running | success | error
+    status: 'pending',
     logs: [],
     result: null,
     error: null,
@@ -47,27 +55,72 @@ function logJob(job, mensagem) {
   if (job.logs.length > 500) job.logs.splice(0, job.logs.length - 500);
 }
 
-// ---------- Health check ----------
+// ---------- Helpers ----------
+function normalizarCookies(cookies) {
+  if (!cookies) return [];
+
+  if (Array.isArray(cookies)) {
+    return cookies
+      .filter((c) => c && c.name && c.value)
+      .map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain || '.empresafacil.ro.gov.br',
+        path: c.path || '/',
+        httpOnly: c.httpOnly ?? false,
+        secure: c.secure ?? true,
+        sameSite: c.sameSite || 'Lax',
+      }));
+  }
+
+  if (typeof cookies === 'string') {
+    return cookies
+      .split(';')
+      .map((par) => par.trim())
+      .filter(Boolean)
+      .map((par) => {
+        const [name, ...rest] = par.split('=');
+        return {
+          name: name.trim(),
+          value: rest.join('=').trim(),
+          domain: 'www.empresafacil.ro.gov.br',
+          path: '/',
+          httpOnly: false,
+          secure: true,
+          sameSite: 'Lax',
+        };
+      });
+  }
+
+  return [];
+}
+
+// ---------- Rotas ----------
 app.get('/', (req, res) => {
   res.json({
-    status: 'Sistema REAL funcionando — arquitetura assíncrona',
+    status: 'Sistema REAL — sessão do usuário',
     timestamp: new Date().toISOString(),
-    versao: 'sistema-real-async',
+    versao: 'sistema-sessao-usuario-v2',
     endpoints: [
-      'POST /run-real-automation     (inicia job, retorna jobId)',
-      'POST /run-automation          (alias)',
-      'GET  /job-status/:jobId       (consulta status)',
+      'POST /run-automation         (body: { cookies, dados })',
+      'GET  /job-status/:jobId',
     ],
   });
 });
 
-// ---------- Lógica de automação (executa em background) ----------
-async function executarAutomacao(job, dados) {
+async function executarAutomacao(job, payload) {
+  const { cookies, dados } = payload;
   let browser = null;
 
   try {
     job.status = 'running';
-    logJob(job, '🚀 Iniciando automação real');
+    logJob(job, '🚀 Iniciando automação com sessão do usuário');
+
+    const cookiesNormalizados = normalizarCookies(cookies);
+    if (cookiesNormalizados.length === 0) {
+      throw new Error('Nenhum cookie de sessão fornecido');
+    }
+    logJob(job, `🍪 ${cookiesNormalizados.length} cookies recebidos: ${cookiesNormalizados.map((c) => c.name).join(', ')}`);
 
     browser = await chromium.launch({
       headless: HEADLESS,
@@ -82,131 +135,52 @@ async function executarAutomacao(job, dados) {
         '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     });
 
+    await context.addCookies(cookiesNormalizados);
+    logJob(job, '✅ Cookies injetados');
+
     const page = await context.newPage();
 
-    logJob(job, '🌐 Acessando empresafacil...');
-    await page.goto('https://www.empresafacil.ro.gov.br/s/login', {
+    logJob(job, '🌐 Acessando empresafacil com sessão...');
+    await page.goto('https://www.empresafacil.ro.gov.br/', {
       waitUntil: 'domcontentloaded',
       timeout: 60_000,
     });
-    logJob(job, `📍 Página carregada: ${page.url()}`);
+    logJob(job, `📍 URL resultante: ${page.url()}`);
 
-    if (dados?.cpf) {
-      try {
-        const cpfInput = page
-          .locator('input[name="username"], input[placeholder*="CPF"], input[type="text"]')
-          .first();
-        await cpfInput.fill(dados.cpf);
-        logJob(job, '✅ CPF preenchido');
-
-        try {
-          await page.click('button[type="submit"], button:has-text("Continuar")');
-          logJob(job, '✅ Clique em "Continuar"');
-          await page.waitForTimeout(5_000);
-        } catch {
-          logJob(job, 'ℹ️ Botão "Continuar" não encontrado');
-        }
-      } catch {
-        logJob(job, 'ℹ️ Campo CPF não encontrado');
-      }
-    }
-
-    logJob(job, '⏳ Aguardando login (até 5 min)...');
-    const maxTentativas = 60;
-    let logado = false;
-
-    for (let t = 1; t <= maxTentativas; t++) {
-      await page.waitForTimeout(5_000);
-      const urlAtual = page.url();
-
-      if (!urlAtual.includes('/s/login') && !urlAtual.includes('sso.acesso.gov.br')) {
-        logJob(job, `✅ Login detectado na URL: ${urlAtual}`);
-        logado = true;
-        break;
-      }
-
-      if (t % 12 === 0) logJob(job, `⏳ Ainda aguardando login... (${t / 12} min)`);
-    }
-
-    if (!logado) {
-      job.status = 'error';
-      job.error = { tipo: 'timeout_login', message: 'Login não completado em 5 min' };
-      logJob(job, '❌ Timeout de login');
-      return;
-    }
-
-    logJob(job, '🔍 Procurando formulário de constituição...');
-    const seletores = [
-      'text=constituição',
-      'text=constituir empresa',
-      'text=nova empresa',
-      'text=abertura',
-      'a[href*="constituicao"]',
-      'button:has-text("Constituir")',
-    ];
-
-    let formularioEncontrado = false;
-    for (const seletor of seletores) {
-      try {
-        const elemento = page.locator(seletor).first();
-        if (await elemento.isVisible({ timeout: 3_000 })) {
-          logJob(job, `✅ Encontrado seletor: ${seletor}`);
-          await elemento.click();
-          await page.waitForTimeout(3_000);
-          formularioEncontrado = true;
-          break;
-        }
-      } catch {}
-    }
-
-    if (!formularioEncontrado) {
-      logJob(job, '🔍 Fallback: buscando links por palavras-chave...');
-      try {
-        const links = await page.$$eval('a', (anchors) =>
-          anchors
-            .filter((a) => {
-              const t = (a.textContent || '').toLowerCase();
-              return (
-                t.includes('constituição') ||
-                t.includes('constituir') ||
-                t.includes('abertura') ||
-                t.includes('nova empresa')
-              );
-            })
-            .map((a) => ({ text: a.textContent?.trim(), href: a.href })),
-        );
-
-        if (links.length > 0) {
-          logJob(job, `🎯 Links encontrados: ${JSON.stringify(links)}`);
-          await page.click(`text=${links[0].text}`);
-          await page.waitForTimeout(3_000);
-          formularioEncontrado = true;
-        }
-      } catch (e) {
-        logJob(job, `❌ Erro na busca de links: ${e.message}`);
-      }
-    }
-
-    if (!formularioEncontrado) {
+    // Verifica sessão
+    const urlAtual = page.url();
+    if (urlAtual.includes('/s/login') || urlAtual.includes('sso.acesso.gov.br')) {
       job.status = 'error';
       job.error = {
-        tipo: 'formulario_nao_encontrado',
-        message: 'Formulário de constituição não encontrado',
-        url_atual: page.url(),
+        tipo: 'sessao_invalida',
+        message:
+          'Cookies inválidos, expirados OU Gov.br amarrou a sessão ao IP de origem. ' +
+          'O servidor do Render tem IP diferente do seu e o Gov.br pode estar recusando.',
+        url_atual: urlAtual,
       };
-      logJob(job, '❌ Formulário não encontrado');
+      logJob(job, '❌ Sessão recusada — redirecionado para login');
       return;
     }
 
-    await page.waitForTimeout(5_000);
-    const protocolo = `REAL${Date.now().toString().slice(-8)}`;
-    logJob(job, `🎉 Concluído! Protocolo: ${protocolo}`);
+    logJob(job, '✅ Sessão aceita! Procurando formulário de constituição...');
+
+    // Pega o título da página pra debug
+    try {
+      const title = await page.title();
+      logJob(job, `📄 Título: ${title}`);
+    } catch {}
+
+    // Por enquanto, só confirma que logou e retorna sucesso
+    // TODO: implementar navegação até o formulário de constituição
+    const protocolo = `TEST${Date.now().toString().slice(-8)}`;
+    logJob(job, `🎉 Teste de sessão concluído! Protocolo fake: ${protocolo}`);
 
     job.status = 'success';
     job.result = {
       protocolo,
       url_final: page.url(),
-      metodo: 'AUTOMACAO_REAL',
+      metodo: 'TESTE_SESSAO',
+      observacao: 'Apenas teste de injeção de sessão. Implementar navegação ao formulário.',
     };
   } catch (error) {
     console.error('❌ Erro na automação:', error);
@@ -221,39 +195,43 @@ async function executarAutomacao(job, dados) {
   }
 }
 
-// ---------- Rotas ----------
-
-// Inicia o job e retorna IMEDIATAMENTE
 function iniciarJob(req, res) {
   const job = criarJob();
-  logJob(job, `📥 Job criado a partir de ${req.method} ${req.path}`);
+  logJob(job, `📥 Job criado em ${req.method} ${req.path}`);
 
-  // Dispara em background — sem await
-  executarAutomacao(job, req.body?.dados).catch((err) => {
-    console.error('❌ Erro fatal no job:', err);
+  if (!req.body?.cookies) {
+    job.status = 'error';
+    job.error = { tipo: 'sem_cookies', message: 'Body precisa ter "cookies"' };
+    job.finishedAt = Date.now();
+    return res.status(400).json({
+      ok: false,
+      jobId: job.id,
+      message: 'Body precisa ter "cookies"',
+    });
+  }
+
+  executarAutomacao(job, req.body).catch((err) => {
+    console.error('❌ Erro fatal:', err);
     job.status = 'error';
     job.error = { tipo: 'erro_fatal', message: err.message };
     job.finishedAt = Date.now();
   });
 
-  // Retorna na hora com o jobId
   res.status(202).json({
     ok: true,
     jobId: job.id,
     status: job.status,
-    message: 'Job iniciado. Use GET /job-status/:jobId para acompanhar.',
+    message: 'Job iniciado',
   });
 }
 
 app.post('/run-real-automation', iniciarJob);
 app.post('/run-automation', iniciarJob);
 
-// Consulta status do job
 app.get('/job-status/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) {
-    return res.status(404).json({ ok: false, message: 'Job não encontrado' });
-  }
+  if (!job) return res.status(404).json({ ok: false, message: 'Job não encontrado' });
+
   res.json({
     ok: true,
     jobId: job.id,
@@ -266,17 +244,14 @@ app.get('/job-status/:jobId', (req, res) => {
   });
 });
 
-// Endpoint informativo
 app.post('/check-login', (req, res) => {
   res.json({
     ok: true,
     loggedIn: null,
-    message: 'Sistema agora é assíncrono. Inicie um job em /run-real-automation.',
-    redirect_to: '/run-real-automation',
+    message: 'Sistema usa cookies agora. Envie POST /run-automation { cookies }.',
   });
 });
 
-// 404 e erro
 app.use((req, res) => {
   res.status(404).json({ ok: false, message: `Rota ${req.method} ${req.path} não encontrada` });
 });
@@ -287,7 +262,7 @@ app.use((err, req, res, _next) => {
 });
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 SISTEMA REAL ASSÍNCRONO na porta ${port}`);
+  console.log(`🚀 Sistema com sessão rodando na porta ${port}`);
   console.log(`✅ Headless: ${HEADLESS}`);
-  console.log(`🎯 Endpoints: POST /run-real-automation, GET /job-status/:jobId`);
+  console.log(`🎯 POST /run-automation { cookies, dados }`);
 });
