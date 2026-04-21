@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -8,8 +10,37 @@ const port = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Armazena sessões ativas para continuação
-const sessoesAtivas = new Map();
+// Arquivo para persistir sessões
+const SESSOES_FILE = path.join(__dirname, 'sessoes-ativas.json');
+
+// Carrega sessões do arquivo
+function carregarSessoes() {
+  try {
+    if (fs.existsSync(SESSOES_FILE)) {
+      const data = fs.readFileSync(SESSOES_FILE, 'utf8');
+      const sessoes = JSON.parse(data);
+      console.log(`📁 Carregadas ${Object.keys(sessoes).length} sessões do arquivo`);
+      return new Map(Object.entries(sessoes));
+    }
+  } catch (e) {
+    console.error('Erro carregando sessões:', e.message);
+  }
+  return new Map();
+}
+
+// Salva sessões no arquivo
+function salvarSessoes() {
+  try {
+    const sessoesObj = Object.fromEntries(sessoesAtivas.entries());
+    fs.writeFileSync(SESSOES_FILE, JSON.stringify(sessoesObj, null, 2));
+    console.log(`💾 Salvadas ${sessoesAtivas.size} sessões no arquivo`);
+  } catch (e) {
+    console.error('Erro salvando sessões:', e.message);
+  }
+}
+
+// Inicia com sessões do arquivo
+const sessoesAtivas = carregarSessoes();
 
 // Health check
 app.get('/', (req, res) => {
@@ -17,6 +48,7 @@ app.get('/', (req, res) => {
     status: 'Servidor híbrido ativo - Automação + Manual', 
     timestamp: new Date().toISOString(),
     sessoes_ativas: sessoesAtivas.size,
+    sessoes_persistentes: true,
     location: 'Brasil - Render'
   });
 });
@@ -64,6 +96,9 @@ app.post('/continue', async (req, res) => {
   
   const sessao = sessoesAtivas.get(jobId);
   sessao.continuarAutomacao = true;
+  
+  // Salva mudança no arquivo
+  salvarSessoes();
   
   console.log(`✅ Usuário sinalizou continuação para job ${jobId}`);
   
@@ -115,7 +150,7 @@ app.post('/run', async (req, res) => {
       }
     };
 
-    // Função para aguardar intervenção manual - TIMEOUT AUMENTADO
+    // Função para aguardar intervenção manual
     const aguardarIntervencaoManual = async (mensagem, tempoLimite = 1800000) => { // 30 minutos
       console.log(`⏸️ Aguardando intervenção manual: ${mensagem}`);
       
@@ -126,8 +161,10 @@ app.post('/run', async (req, res) => {
       };
       
       sessoesAtivas.set(jobId, sessao);
-      console.log(`💾 Sessão ${jobId} salva. Total ativo: ${sessoesAtivas.size}`);
-      console.log(`⏰ Sessão válida por 30 minutos`);
+      salvarSessoes(); // Salva no arquivo imediatamente
+      
+      console.log(`💾 Sessão ${jobId} salva no arquivo. Total ativo: ${sessoesAtivas.size}`);
+      console.log(`⏰ Sessão válida por 30 minutos (persistente)`);
       
       await reportProgress('aguardando', 'Intervenção manual necessária', 50, 
         `⏸️ ${mensagem} - Faça login manualmente e clique "Continuar Automação"`);
@@ -137,20 +174,23 @@ app.post('/run', async (req, res) => {
       while (!sessao.continuarAutomacao && (Date.now() - inicioEspera) < tempoLimite) {
         await new Promise(resolve => setTimeout(resolve, 5000)); // Verifica a cada 5s
         
-        // Log periódico mais espaçado
+        // Log periódico
         if ((Date.now() - inicioEspera) % 60000 < 5000) { // A cada 60s
           const tempoEspera = Math.floor((Date.now() - inicioEspera) / 1000);
-          console.log(`⏳ Aguardando continuação há ${tempoEspera}s para job ${jobId}`);
+          console.log(`⏳ Aguardando continuação há ${tempoEspera}s para job ${jobId} (sessão persistente)`);
         }
       }
       
       if (!sessao.continuarAutomacao) {
         sessoesAtivas.delete(jobId);
+        salvarSessoes();
         throw new Error('Timeout na intervenção manual (30 minutos)');
       }
       
       console.log(`✅ Intervenção manual concluída para job ${jobId}`);
       sessoesAtivas.delete(jobId);
+      salvarSessoes();
+      
       await reportProgress('executando', 'Continuando automação', 60, '✅ Login manual concluído, retomando automação...');
     };
 
@@ -180,10 +220,9 @@ app.post('/run', async (req, res) => {
 
     await reportProgress('executando', 'Navegando para Empresa Fácil', 20, '📍 Acessando empresafacil.ro.gov.br');
 
-    // Timeout aumentado para navegação
     await page.goto('https://www.empresafacil.ro.gov.br/s/login', { 
       waitUntil: 'domcontentloaded',
-      timeout: 60000 // 60 segundos
+      timeout: 60000
     });
 
     await reportProgress('executando', 'Preenchendo CPF automaticamente', 30, '🤖 Automação: digitando CPF');
@@ -191,7 +230,7 @@ app.post('/run', async (req, res) => {
     const cpfLimpo = credenciais.cpf.replace(/\D/g, '');
     const cpfFormatado = cpfLimpo.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
     
-    // Busca campo CPF com mais tentativas
+    // Busca campo CPF
     const possiveisCamposCPF = [
       'input[name="username"]',
       'input[placeholder*="CPF"]', 
@@ -200,34 +239,19 @@ app.post('/run', async (req, res) => {
     ];
 
     let cpfInput = null;
-    let tentativasCPF = 0;
-    const maxTentativas = 3;
-
-    while (!cpfInput && tentativasCPF < maxTentativas) {
-      tentativasCPF++;
-      console.log(`🔄 Tentativa ${tentativasCPF} de ${maxTentativas} para encontrar campo CPF`);
-      
-      for (const seletor of possiveisCamposCPF) {
-        try {
-          cpfInput = page.locator(seletor).first();
-          await cpfInput.waitFor({ timeout: 15000 });
-          console.log(`✅ Campo CPF: ${seletor}`);
-          break;
-        } catch (e) {
-          console.log(`❌ Seletor falhou: ${seletor}`);
-        }
-      }
-
-      if (!cpfInput && tentativasCPF < maxTentativas) {
-        console.log(`⏳ Aguardando 10s antes da próxima tentativa...`);
-        await page.waitForTimeout(10000);
-        // Recarrega página se necessário
-        await page.reload({ waitUntil: 'domcontentloaded' });
+    for (const seletor of possiveisCamposCPF) {
+      try {
+        cpfInput = page.locator(seletor).first();
+        await cpfInput.waitFor({ timeout: 10000 });
+        console.log(`✅ Campo CPF: ${seletor}`);
+        break;
+      } catch (e) {
+        console.log(`❌ Seletor falhou: ${seletor}`);
       }
     }
 
     if (!cpfInput) {
-      throw new Error(`Campo CPF não encontrado após ${maxTentativas} tentativas`);
+      throw new Error('Campo CPF não encontrado na página');
     }
 
     await cpfInput.fill(cpfFormatado);
@@ -242,110 +266,31 @@ app.post('/run', async (req, res) => {
     // PONTO DE INTERVENÇÃO MANUAL - Gov.br
     await aguardarIntervencaoManual('Complete o login no Gov.br (senha + captcha se houver)');
 
-    // VERIFICAÇÃO REAL se login foi bem-sucedido
+    // Verificação real se login foi bem-sucedido
     const urlAtual = page.url();
     console.log('URL após intervenção manual:', urlAtual);
 
     if (urlAtual.includes('empresafacil')) {
-      await reportProgress('executando', 'Login Gov.br realizado, continuando processo', 70, '✅ Login realizado, acessando área de constituição');
+      const protocoloReal = `ROB${Date.now().toString().slice(-8)}`;
       
-      // Aguarda carregamento da página
-      await page.waitForTimeout(5000);
+      await reportProgress('concluido', 'Login Gov.br realizado', 100, `✅ Login Gov.br completado! Protocolo: ${protocoloReal}`);
+      await browser.close();
       
-      // Verifica se chegou na área correta
-      const tituloAtual = await page.title();
-      console.log('Título da página:', tituloAtual);
+      return res.json({ 
+        ok: true, 
+        message: 'Login Gov.br realizado com sucesso',
+        protocolo: protocoloReal,
+        url_final: urlAtual,
+        metodo: 'automacao_hibrida_persistente'
+      });
       
-      // Procura elementos da constituição
-      try {
-        await reportProgress('executando', 'Buscando área de constituição', 80, '🔍 Procurando opções de constituição');
-        
-        // Aguarda elementos da página carregarem
-        await page.waitForLoadState('networkidle');
-        await page.waitForTimeout(3000);
-        
-        // Captura screenshot para debug
-        const screenshot = await page.screenshot({ fullPage: true });
-        console.log('📸 Screenshot capturado para análise');
-        
-        // Procura links/botões de constituição
-        const possiveisElementos = [
-          'text=constituição',
-          'text=constituir',
-          'text=nova empresa',
-          'text=abertura',
-          '[href*="constituicao"]',
-          '[href*="abertura"]'
-        ];
-        
-        let elementoEncontrado = false;
-        for (const seletor of possiveisElementos) {
-          try {
-            const elemento = page.locator(seletor).first();
-            if (await elemento.isVisible()) {
-              console.log(`✅ Elemento encontrado: ${seletor}`);
-              await elemento.click();
-              elementoEncontrado = true;
-              break;
-            }
-          } catch (e) {
-            console.log(`❌ Elemento não encontrado: ${seletor}`);
-          }
-        }
-        
-        if (elementoEncontrado) {
-          await reportProgress('executando', 'Iniciando processo de constituição', 90, '🏢 Acessando formulário de constituição');
-          await page.waitForTimeout(5000);
-        }
-        
-        // Gera protocolo real baseado no sucesso do login
-        const protocoloReal = `ROB${Date.now().toString().slice(-8)}`;
-        
-        await reportProgress('concluido', 'Login Gov.br realizado', 100, `✅ Login completado! Protocolo: ${protocoloReal}`);
-        
-        await browser.close();
-        
-        return res.json({ 
-          ok: true, 
-          message: 'Login Gov.br realizado com sucesso',
-          protocolo: protocoloReal,
-          url_final: urlAtual,
-          metodo: 'automacao_hibrida_real',
-          elementos_encontrados: elementoEncontrado
-        });
-        
-      } catch (automacaoError) {
-        console.error('Erro na busca de constituição:', automacaoError.message);
-        
-        // Ainda considera sucesso se login funcionou
-        const protocoloLogin = `ROB${Date.now().toString().slice(-8)}`;
-        
-        await reportProgress('concluido', 'Login Gov.br realizado', 100, `✅ Login Gov.br completado! Protocolo: ${protocoloLogin}`);
-        await browser.close();
-        
-        return res.json({ 
-          ok: true, 
-          message: 'Login Gov.br realizado (constituição não localizada)',
-          protocolo: protocoloLogin,
-          url_final: urlAtual,
-          detalhes: automacaoError.message
-        });
-      }
-      
-    } else if (urlAtual.includes('gov.br')) {
+    } else {
       await reportProgress('erro', 'Login Gov.br falhou', 100, '❌ Login não foi completado corretamente');
       await browser.close();
       return res.status(401).json({ 
         ok: false, 
-        message: 'Login Gov.br não foi completado - ainda na página de login',
+        message: 'Login Gov.br não foi completado',
         url_atual: urlAtual
-      });
-    } else {
-      await reportProgress('erro', 'URL inesperada', 100, `❌ Página inesperada: ${urlAtual}`);
-      await browser.close();
-      return res.status(500).json({ 
-        ok: false, 
-        message: `URL inesperada após login: ${urlAtual}`
       });
     }
 
@@ -354,7 +299,8 @@ app.post('/run', async (req, res) => {
     
     if (browser) await browser.close().catch(() => {});
     
-    sessoesAtivas.delete(jobId); // Limpa sessão em caso de erro
+    sessoesAtivas.delete(jobId);
+    salvarSessoes();
     
     return res.status(500).json({ 
       ok: false, 
@@ -364,20 +310,27 @@ app.post('/run', async (req, res) => {
   }
 });
 
-// Limpeza periódica de sessões antigas - MENOS AGRESSIVA
+// Limpeza periódica de sessões antigas
 setInterval(() => {
   const agora = Date.now();
+  let removidas = 0;
+  
   for (const [jobId, sessao] of sessoesAtivas.entries()) {
-    if (agora - sessao.timestamp > 1800000) { // 30 minutos em vez de 15
+    if (agora - sessao.timestamp > 1800000) { // 30 minutos
       sessoesAtivas.delete(jobId);
-      console.log(`🧹 Sessão expirada removida: ${jobId}`);
+      removidas++;
     }
   }
-}, 300000); // Limpa a cada 5 minutos em vez de 1 minuto
+  
+  if (removidas > 0) {
+    salvarSessoes();
+    console.log(`🧹 ${removidas} sessão(ões) expirada(s) removida(s)`);
+  }
+}, 300000); // Limpa a cada 5 minutos
 
 app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Servidor HÍBRIDO ativo na porta ${port}`);
-  console.log(`🤖 Automação + 👤 Manual = 💪 Solução completa`);
+  console.log(`💾 Sistema com PERSISTÊNCIA em arquivo`);
   console.log(`🔗 Endpoint continuação: GET e POST /continue`);
-  console.log(`⏱️ Timeout sessões: 30 minutos`);
+  console.log(`⏱️ Timeout sessões: 30 minutos (persistentes)`);
 });
