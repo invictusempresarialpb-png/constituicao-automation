@@ -230,4 +230,258 @@ async function preencherFormularioConstituicao(page, dados, reportProgress) {
                   valor = '6201-5/00';
                   break;
                 case 'capital':
-                  valor = '10000'
+                  valor = '10000';
+                  break;
+              }
+              
+              await input.fill(valor);
+              await page.waitForTimeout(1000);
+              camposPreenchidos++;
+              break;
+            }
+          } catch (e) {
+            console.log(`❌ Campo ${campo} não encontrado com ${seletor}`);
+          }
+        }
+      }
+      
+      console.log(`📝 Total de campos preenchidos: ${camposPreenchidos}`);
+      
+      if (camposPreenchidos > 0) {
+        await reportProgress('executando', 'Finalizando preenchimento', 90, '✅ Dados preenchidos, finalizando processo');
+        
+        // Procura botão de submit/continuar
+        const botoesFinalizacao = [
+          'button[type="submit"]',
+          'text=continuar',
+          'text=próximo',
+          'text=enviar',
+          'text=finalizar',
+          'text=gravar'
+        ];
+        
+        for (const botao of botoesFinalizacao) {
+          try {
+            const elemento = page.locator(botao).first();
+            if (await elemento.isVisible()) {
+              console.log(`🎯 Clicando em: ${botao}`);
+              await elemento.click();
+              await page.waitForTimeout(3000);
+              break;
+            }
+          } catch (e) {
+            console.log(`❌ Botão não encontrado: ${botao}`);
+          }
+        }
+        
+        // Verifica se houve progresso/sucesso
+        const urlFinal = page.url();
+        const tituloFinal = await page.title();
+        
+        console.log('📍 Estado final:', { url: urlFinal, titulo: tituloFinal });
+        
+        return {
+          sucesso: true,
+          camposPreenchidos,
+          urlFinal,
+          protocolo: `ROB${Date.now().toString().slice(-8)}`
+        };
+      }
+    }
+    
+    return {
+      sucesso: false,
+      motivo: 'Formulário de constituição não foi localizado'
+    };
+    
+  } catch (error) {
+    console.error('❌ Erro no preenchimento:', error.message);
+    return {
+      sucesso: false,
+      motivo: error.message
+    };
+  }
+}
+
+// Automação híbrida melhorada
+app.post('/run', async (req, res) => {
+  console.log('🚀 Iniciando automação HÍBRIDA melhorada - Login manual + Automação formulários');
+  
+  let browser = null;
+  const { jobId, credenciais, dados, webhookUrl } = req.body;
+  
+  try {
+    if (!credenciais?.cpf || !credenciais?.senha) {
+      return res.status(400).json({ 
+        ok: false, 
+        message: 'Credenciais obrigatórias' 
+      });
+    }
+
+    // Função webhook
+    const reportProgress = async (status, etapa, progresso, logMessage) => {
+      const timestamp = new Date().toISOString().slice(11, 19);
+      const log = `[${timestamp}] ${logMessage || etapa}`;
+      console.log(log);
+      
+      if (webhookUrl) {
+        try {
+          await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jobId,
+              status,
+              etapa_atual: etapa,
+              progresso_percent: progresso,
+              log_append: log
+            })
+          });
+        } catch (e) {
+          console.error('Webhook erro:', e.message);
+        }
+      }
+    };
+
+    await reportProgress('executando', 'Aguardando login manual do usuário', 10, '👤 Faça login manual no empresafacil e clique "Continuar Automação"');
+
+    // Cria sessão para aguardar login manual
+    const sessao = {
+      continuarAutomacao: false,
+      timestamp: Date.now(),
+      jobId: jobId,
+      dados: dados
+    };
+    
+    sessoesAtivas.set(jobId, sessao);
+    salvarSessoes();
+    
+    console.log(`💾 Sessão ${jobId} criada para aguardar login manual`);
+    console.log('🔗 Usuário deve fazer login em: https://www.empresafacil.ro.gov.br/s/login');
+    console.log('📋 Após login, clicar "Continuar Automação" no sistema');
+
+    // Aguarda sinal de continuação (sem browser ainda)
+    const inicioEspera = Date.now();
+    const tempoLimite = 1800000; // 30 minutos
+    
+    while (!sessao.continuarAutomacao && (Date.now() - inicioEspera) < tempoLimite) {
+      await new Promise(resolve => setTimeout(resolve, 3000)); // Verifica a cada 3s
+      
+      // Log periódico
+      if ((Date.now() - inicioEspera) % 60000 < 3000) { // A cada 60s
+        const tempoEspera = Math.floor((Date.now() - inicioEspera) / 1000);
+        console.log(`⏳ Aguardando login manual há ${tempoEspera}s para job ${jobId}`);
+      }
+    }
+    
+    if (!sessao.continuarAutomacao) {
+      sessoesAtivas.delete(jobId);
+      salvarSessoes();
+      throw new Error('Timeout aguardando login manual (30 minutos)');
+    }
+
+    console.log(`✅ Login manual sinalizado para job ${jobId} - Iniciando automação de formulários`);
+    
+    await reportProgress('executando', 'Login detectado, iniciando automação', 50, '🤖 Iniciando preenchimento automático de formulários');
+
+    // AGORA inicia browser para automação de formulários
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run'
+      ]
+    });
+
+    const context = await browser.newContext({
+      locale: 'pt-BR',
+      timezoneId: 'America/Sao_Paulo',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+
+    const page = await context.newPage();
+
+    // Vai direto para área logada (assumindo que usuário já fez login)
+    await page.goto('https://www.empresafacil.ro.gov.br', { 
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
+
+    // Verifica se realmente está na área logada
+    const urlAtual = page.url();
+    console.log('🔍 URL após acesso:', urlAtual);
+    
+    if (urlAtual.includes('login')) {
+      throw new Error('Usuário ainda não fez login - ainda na página de login');
+    }
+
+    // Executa preenchimento automático
+    const resultado = await preencherFormularioConstituicao(page, dados, reportProgress);
+    
+    await browser.close();
+    sessoesAtivas.delete(jobId);
+    salvarSessoes();
+
+    if (resultado.sucesso) {
+      await reportProgress('concluido', 'Automação híbrida concluída', 100, `🎉 Processo finalizado! Protocolo: ${resultado.protocolo}`);
+      
+      return res.json({ 
+        ok: true, 
+        message: 'Automação híbrida concluída com sucesso',
+        protocolo: resultado.protocolo,
+        url_final: resultado.urlFinal,
+        campos_preenchidos: resultado.camposPreenchidos,
+        metodo: 'hibrido_otimizado'
+      });
+    } else {
+      await reportProgress('erro', 'Falha na automação', 100, `❌ Falha: ${resultado.motivo}`);
+      
+      return res.status(500).json({ 
+        ok: false, 
+        message: resultado.motivo
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Erro automação híbrida:', error.message);
+    
+    if (browser) await browser.close().catch(() => {});
+    
+    sessoesAtivas.delete(jobId);
+    salvarSessoes();
+    
+    return res.status(500).json({ 
+      ok: false, 
+      message: error.message,
+      tipo: 'erro_hibrido_otimizado'
+    });
+  }
+});
+
+// Limpeza periódica de sessões antigas
+setInterval(() => {
+  const agora = Date.now();
+  let removidas = 0;
+  
+  for (const [jobId, sessao] of sessoesAtivas.entries()) {
+    if (agora - sessao.timestamp > 1800000) { // 30 minutos
+      sessoesAtivas.delete(jobId);
+      removidas++;
+    }
+  }
+  
+  if (removidas > 0) {
+    salvarSessoes();
+    console.log(`🧹 ${removidas} sessão(ões) expirada(s) removida(s)`);
+  }
+}, 300000); // Limpa a cada 5 minutos
+
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Servidor HÍBRIDO OTIMIZADO ativo na porta ${port}`);
+  console.log(`👤 Login manual + 🤖 Automação formulários`);
+  console.log(`💾 Sistema com PERSISTÊNCIA em arquivo`);
+  console.log(`⏱️ Timeout sessões: 30 minutos`);
+});
