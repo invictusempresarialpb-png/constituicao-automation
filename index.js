@@ -45,13 +45,86 @@ const sessoesAtivas = carregarSessoes();
 // Health check
 app.get('/', (req, res) => {
   res.json({ 
-    status: 'Servidor híbrido ativo - Login manual + Automação formulários', 
+    status: 'Servidor híbrido ativo - Fluxo lógico: Login primeiro + Automação', 
     timestamp: new Date().toISOString(),
     sessoes_ativas: sessoesAtivas.size,
     sessoes_persistentes: true,
     location: 'Brasil - Render',
-    versao: 'corrigida-status-200'
+    versao: 'fluxo-logico-v2',
+    endpoints: ['/check-login', '/run-automation', '/continue', '/run']
   });
+});
+
+// Endpoint para verificar se usuário está logado
+app.post('/check-login', async (req, res) => {
+  const { jobId } = req.body;
+  
+  console.log(`=== CHECK LOGIN ===`);
+  console.log('JobId:', jobId);
+  console.log(`=== FIM CHECK ===`);
+  
+  try {
+    res.status(200).json({
+      ok: true,
+      loggedIn: false, // Para teste inicial - sempre retorna false
+      message: 'Verificação de login realizada',
+      timestamp: new Date().toISOString(),
+      help: 'Faça login manual no empresafacil primeiro'
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro check-login:', error.message);
+    
+    res.status(200).json({
+      ok: false,
+      loggedIn: false,
+      message: error.message,
+      tipo: 'erro_verificacao'
+    });
+  }
+});
+
+// Endpoint para automação quando usuário já está logado
+app.post('/run-automation', async (req, res) => {
+  console.log('🚀 Iniciando automação com usuário já logado');
+  
+  let browser = null;
+  const { jobId, dados } = req.body;
+  
+  try {
+    console.log(`Job ${jobId} - Iniciando automação pós-login...`);
+
+    // Simula processo de automação mais realista
+    console.log('🤖 Simulando navegação e preenchimento...');
+    
+    // Simula delay de processamento
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Para teste inicial, retorna sucesso simulado
+    const protocoloSimulado = `ROB${Date.now().toString().slice(-8)}`;
+    
+    console.log(`✅ Automação simulada concluída - Protocolo: ${protocoloSimulado}`);
+    
+    res.status(200).json({ 
+      ok: true, 
+      message: 'Automação simulada concluída com sucesso',
+      protocolo: protocoloSimulado,
+      metodo: 'simulacao_pos_login',
+      timestamp: new Date().toISOString(),
+      dados_processados: dados || {}
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro automação pós-login:', error.message);
+    
+    if (browser) await browser.close().catch(() => {});
+    
+    res.status(200).json({ 
+      ok: false, 
+      message: error.message,
+      tipo: 'erro_automacao'
+    });
+  }
 });
 
 // GET para teste simples do endpoint continue
@@ -306,7 +379,7 @@ async function preencherFormularioConstituicao(page, dados, reportProgress) {
   }
 }
 
-// Automação híbrida otimizada
+// Automação híbrida otimizada (mantido para compatibilidade)
 app.post('/run', async (req, res) => {
   console.log('🚀 Iniciando automação HÍBRIDA otimizada - Login manual + Automação formulários');
   
@@ -497,9 +570,9 @@ setInterval(() => {
 }, 300000); // Limpa a cada 5 minutos
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 Servidor HÍBRIDO CORRIGIDO ativo na porta ${port}`);
-  console.log(`👤 Login manual + 🤖 Automação formulários`);
+  console.log(`🚀 Servidor HÍBRIDO FLUXO LÓGICO ativo na porta ${port}`);
+  console.log(`🔄 Fluxo: 1️⃣ Login manual → 2️⃣ Verificar → 3️⃣ Automação`);
   console.log(`💾 Sistema com PERSISTÊNCIA em arquivo`);
   console.log(`⏱️ Timeout sessões: 30 minutos`);
-  console.log(`✅ Status 200 para todos os erros (sem 404)`);
+  console.log(`✅ Endpoints: /check-login, /run-automation, /continue, /run`);
 });
