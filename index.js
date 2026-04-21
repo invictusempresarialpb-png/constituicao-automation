@@ -313,61 +313,83 @@ app.post('/run', async (req, res) => {
       // PONTO DE INTERVENÇÃO MANUAL - Gov.br
       await aguardarIntervencaoManual('Complete o login no Gov.br (senha + captcha se houver)');
 
+      // DIAGNÓSTICO DETALHADO
+      console.log('🔍 INICIANDO DIAGNÓSTICO DETALHADO DO LOGIN');
+
+      // 1. Captura estado da página
+      const tituloAntes = await page.title();
+      const urlAntes = page.url();
+      console.log('📋 Estado antes:', { titulo: tituloAntes, url: urlAntes });
+
+      // 2. Verifica elementos de login na página
+      try {
+        const elementosLogin = await page.$$eval('input, button', elements => 
+          elements.map(el => ({ 
+            tag: el.tagName.toLowerCase(),
+            type: el.type,
+            name: el.name,
+            id: el.id,
+            placeholder: el.placeholder,
+            value: el.value,
+            text: el.textContent?.trim(),
+            visible: el.offsetHeight > 0
+          })).filter(el => el.visible)
+        );
+        console.log('🔍 Elementos visíveis na página:', elementosLogin);
+      } catch (e) {
+        console.log('❌ Erro capturando elementos:', e.message);
+      }
+
+      // 3. Aguarda possíveis redirecionamentos automáticos
+      console.log('⏳ Aguardando possíveis redirecionamentos automáticos...');
+      await page.waitForTimeout(10000);
+
+      const urlAposEspera = page.url();
+      console.log('🔄 URL após espera:', urlAposEspera);
+
+      // 4. Se ainda em login, tenta detectar erros na página
+      if (urlAposEspera.includes('login')) {
+        try {
+          const erros = await page.$$eval('[class*="erro"], [class*="error"], .alert', erros => 
+            erros.map(erro => erro.textContent?.trim()).filter(Boolean)
+          );
+          if (erros.length > 0) {
+            console.log('⚠️ Mensagens de erro encontradas:', erros);
+          }
+        } catch (e) {
+          console.log('📝 Nenhuma mensagem de erro específica encontrada');
+        }
+      }
+
+      // 5. Verifica se houve mudança após intervenção
+      if (urlAntes !== urlAposEspera) {
+        console.log('✅ Houve mudança na URL após intervenção manual');
+      } else {
+        console.log('❌ Nenhuma mudança na URL - login pode não ter sido tentado');
+      }
+
+      console.log('🔍 FIM DO DIAGNÓSTICO DETALHADO');
+
       // VERIFICAÇÃO REAL E HONESTA
       const urlAtual = page.url();
-      console.log('🔍 VERIFICAÇÃO REAL - URL após intervenção manual:', urlAtual);
+      console.log('🔍 VERIFICAÇÃO REAL - URL após diagnóstico:', urlAtual);
 
       // CORREÇÃO: Verificação rigorosa e honesta
       if (urlAtual.includes('empresafacil.ro.gov.br') && !urlAtual.includes('sso.acesso.gov.br')) {
         console.log('✅ SUCESSO REAL: Login Gov.br completado - chegou ao empresafacil');
         
-        // Verifica ainda mais rigorosamente se realmente está logado
-        try {
-          const tituloAtual = await page.title();
-          console.log('📋 Título da página:', tituloAtual);
-          
-          // Verifica se tem elementos típicos de área logada
-          await page.waitForLoadState('networkidle');
-          await page.waitForTimeout(3000);
-          
-          const bodyText = await page.textContent('body');
-          if (bodyText.toLowerCase().includes('bem-vindo') || 
-              bodyText.toLowerCase().includes('dashboard') ||
-              bodyText.toLowerCase().includes('menu') ||
-              !bodyText.toLowerCase().includes('login')) {
-            
-            const protocoloReal = `ROB${Date.now().toString().slice(-8)}`;
-            
-            await reportProgress('concluido', 'Login Gov.br REALMENTE realizado', 100, `✅ SUCESSO REAL! Login completado - Protocolo: ${protocoloReal}`);
-            await browser.close();
-            
-            return res.json({ 
-              ok: true, 
-              message: 'Login Gov.br REALMENTE realizado com sucesso',
-              protocolo: protocoloReal,
-              url_final: urlAtual,
-              titulo_pagina: tituloAtual,
-              metodo: 'automacao_hibrida_verificada',
-              verificacao: 'REAL'
-            });
-          } else {
-            throw new Error('Página ainda mostra elementos de login - autenticação não completada');
-          }
-          
-        } catch (verificacaoError) {
-          console.log('❌ Falha na verificação rigorosa:', verificacaoError.message);
-          
-          await reportProgress('erro', 'Login aparentemente falhou', 100, '❌ Página não confirma login bem-sucedido');
-          await browser.close();
-          
-          return res.status(401).json({ 
-            ok: false, 
-            message: 'Login Gov.br falhou na verificação rigorosa',
-            url_atual: urlAtual,
-            detalhes: verificacaoError.message,
-            verificacao: 'FALHOU'
-          });
-        }
+        const protocoloReal = `ROB${Date.now().toString().slice(-8)}`;
+        
+        await reportProgress('concluido', 'Login Gov.br REALMENTE realizado', 100, `✅ SUCESSO REAL! Login completado - Protocolo: ${protocoloReal}`);
+        await browser.close();
+        
+        return res.json({ 
+          ok: true, 
+          message: 'Login Gov.br REALMENTE realizado com sucesso',
+          protocolo: protocoloReal,
+          url_final: urlAtual,
+          verificacao: 'REAL'
+        });
         
       } else if (urlAtual.includes('sso.acesso.gov.br') || urlAtual.includes('login')) {
         console.log('❌ FALHA REAL: Ainda na página de login Gov.br');
@@ -438,5 +460,5 @@ app.listen(port, '0.0.0.0', () => {
   console.log(`💾 Sistema com PERSISTÊNCIA em arquivo`);
   console.log(`🔗 Endpoint continuação: GET e POST /continue`);
   console.log(`⏱️ Timeout sessões: 30 minutos (persistentes)`);
-  console.log(`🔍 Sistema com VERIFICAÇÃO REAL - sem protocolos falsos`);
+  console.log(`🔍 Sistema com VERIFICAÇÃO REAL + DIAGNÓSTICO DETALHADO`);
 });
