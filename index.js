@@ -256,42 +256,92 @@ app.post('/run', async (req, res) => {
 
     await cpfInput.fill(cpfFormatado);
     await page.waitForTimeout(2000);
-    await page.click('button[type="submit"]');
-    
-    await reportProgress('executando', 'Redirecionando para Gov.br', 40, '🔄 Redirecionamento automático');
+
+    console.log('🔍 Procurando botão de submit...');
+
+    // Debug: vê todos os botões da página
+    const botoes = await page.$$eval('button', buttons => 
+      buttons.map(btn => ({ 
+        text: btn.textContent?.trim(),
+        type: btn.type,
+        disabled: btn.disabled
+      }))
+    );
+    console.log('Botões encontrados:', botoes);
+
+    try {
+      await page.click('button[type="submit"]');
+      console.log('✅ Botão submit clicado');
+    } catch (e) {
+      console.log('❌ Erro no clique submit:', e.message);
+      
+      // Tenta alternativas
+      const alternativas = [
+        'button:has-text("Entrar")',
+        'button:has-text("Continuar")', 
+        'button:has-text("Próximo")',
+        'input[type="submit"]',
+        '[type="submit"]'
+      ];
+      
+      for (const alt of alternativas) {
+        try {
+          await page.click(alt);
+          console.log(`✅ Clique alternativo funcionou: ${alt}`);
+          break;
+        } catch (e) {
+          console.log(`❌ Alternativa falhou: ${alt}`);
+        }
+      }
+    }
+
+    await page.waitForTimeout(5000);
+    console.log('URL após submit:', page.url());
+
+    // Aguarda redirecionamento
     await page.waitForTimeout(10000);
+    console.log('URL final após aguardar:', page.url());
+    
+    await reportProgress('executando', 'Redirecionamento para Gov.br', 40, '🔄 Redirecionamento automático');
 
     console.log('URL atual:', page.url());
 
-    // PONTO DE INTERVENÇÃO MANUAL - Gov.br
-    await aguardarIntervencaoManual('Complete o login no Gov.br (senha + captcha se houver)');
+    // Verifica se chegou no Gov.br
+    if (page.url().includes('gov.br')) {
+      console.log('🎯 Redirecionamento para Gov.br bem-sucedido');
+      
+      // PONTO DE INTERVENÇÃO MANUAL - Gov.br
+      await aguardarIntervencaoManual('Complete o login no Gov.br (senha + captcha se houver)');
 
-    // Verificação real se login foi bem-sucedido
-    const urlAtual = page.url();
-    console.log('URL após intervenção manual:', urlAtual);
+      // Verificação real se login foi bem-sucedido
+      const urlAtual = page.url();
+      console.log('URL após intervenção manual:', urlAtual);
 
-    if (urlAtual.includes('empresafacil')) {
-      const protocoloReal = `ROB${Date.now().toString().slice(-8)}`;
-      
-      await reportProgress('concluido', 'Login Gov.br realizado', 100, `✅ Login Gov.br completado! Protocolo: ${protocoloReal}`);
-      await browser.close();
-      
-      return res.json({ 
-        ok: true, 
-        message: 'Login Gov.br realizado com sucesso',
-        protocolo: protocoloReal,
-        url_final: urlAtual,
-        metodo: 'automacao_hibrida_persistente'
-      });
-      
+      if (urlAtual.includes('empresafacil')) {
+        const protocoloReal = `ROB${Date.now().toString().slice(-8)}`;
+        
+        await reportProgress('concluido', 'Login Gov.br realizado', 100, `✅ Login Gov.br completado! Protocolo: ${protocoloReal}`);
+        await browser.close();
+        
+        return res.json({ 
+          ok: true, 
+          message: 'Login Gov.br realizado com sucesso',
+          protocolo: protocoloReal,
+          url_final: urlAtual,
+          metodo: 'automacao_hibrida_persistente'
+        });
+        
+      } else {
+        await reportProgress('erro', 'Login Gov.br falhou', 100, '❌ Login não foi completado corretamente');
+        await browser.close();
+        return res.status(401).json({ 
+          ok: false, 
+          message: 'Login Gov.br não foi completado',
+          url_atual: urlAtual
+        });
+      }
     } else {
-      await reportProgress('erro', 'Login Gov.br falhou', 100, '❌ Login não foi completado corretamente');
-      await browser.close();
-      return res.status(401).json({ 
-        ok: false, 
-        message: 'Login Gov.br não foi completado',
-        url_atual: urlAtual
-      });
+      throw new Error(`Redirecionamento falhou - URL atual: ${page.url()}`);
     }
 
   } catch (error) {
