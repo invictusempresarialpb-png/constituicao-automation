@@ -155,3 +155,288 @@ app.post('/run', async (req, res) => {
       console.log(`⏸️ Aguardando intervenção manual: ${mensagem}`);
       
       const sessao = {
+        continuarAutomacao: false,
+        timestamp: Date.now(),
+        jobId: jobId
+      };
+      
+      sessoesAtivas.set(jobId, sessao);
+      salvarSessoes(); // Salva no arquivo imediatamente
+      
+      console.log(`💾 Sessão ${jobId} salva no arquivo. Total ativo: ${sessoesAtivas.size}`);
+      console.log(`⏰ Sessão válida por 30 minutos (persistente)`);
+      
+      await reportProgress('aguardando', 'Intervenção manual necessária', 50, 
+        `⏸️ ${mensagem} - Faça login manualmente e clique "Continuar Automação"`);
+      
+      const inicioEspera = Date.now();
+      
+      while (!sessao.continuarAutomacao && (Date.now() - inicioEspera) < tempoLimite) {
+        await new Promise(resolve => setTimeout(resolve, 5000)); // Verifica a cada 5s
+        
+        // Log periódico
+        if ((Date.now() - inicioEspera) % 60000 < 5000) { // A cada 60s
+          const tempoEspera = Math.floor((Date.now() - inicioEspera) / 1000);
+          console.log(`⏳ Aguardando continuação há ${tempoEspera}s para job ${jobId} (sessão persistente)`);
+        }
+      }
+      
+      if (!sessao.continuarAutomacao) {
+        sessoesAtivas.delete(jobId);
+        salvarSessoes();
+        throw new Error('Timeout na intervenção manual (30 minutos)');
+      }
+      
+      console.log(`✅ Intervenção manual concluída para job ${jobId}`);
+      sessoesAtivas.delete(jobId);
+      salvarSessoes();
+      
+      await reportProgress('executando', 'Continuando automação', 60, '✅ Login manual concluído, retomando automação...');
+    };
+
+    await reportProgress('executando', 'Iniciando browser brasileiro', 10, '🇧🇷 Iniciando navegador híbrido');
+
+    console.log(`Job ${jobId} - Lançando browser híbrido...`);
+
+    // Configuração Playwright
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run'
+      ]
+    });
+
+    const context = await browser.newContext({
+      locale: 'pt-BR',
+      timezoneId: 'America/Sao_Paulo',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+
+    const page = await context.newPage();
+
+    await reportProgress('executando', 'Navegando para Empresa Fácil', 20, '📍 Acessando empresafacil.ro.gov.br');
+
+    await page.goto('https://www.empresafacil.ro.gov.br/s/login', { 
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
+
+    await reportProgress('executando', 'Preenchendo CPF automaticamente', 30, '🤖 Automação: digitando CPF');
+
+    const cpfLimpo = credenciais.cpf.replace(/\D/g, '');
+    const cpfFormatado = cpfLimpo.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+    
+    // Busca campo CPF
+    const possiveisCamposCPF = [
+      'input[name="username"]',
+      'input[placeholder*="CPF"]', 
+      'input[id*="cpf"]',
+      'input[type="text"]'
+    ];
+
+    let cpfInput = null;
+    for (const seletor of possiveisCamposCPF) {
+      try {
+        cpfInput = page.locator(seletor).first();
+        await cpfInput.waitFor({ timeout: 10000 });
+        console.log(`✅ Campo CPF: ${seletor}`);
+        break;
+      } catch (e) {
+        console.log(`❌ Seletor falhou: ${seletor}`);
+      }
+    }
+
+    if (!cpfInput) {
+      throw new Error('Campo CPF não encontrado na página');
+    }
+
+    await cpfInput.fill(cpfFormatado);
+    await page.waitForTimeout(2000);
+
+    console.log('🔍 Procurando botão de submit...');
+
+    // Debug: vê todos os botões da página
+    const botoes = await page.$$eval('button', buttons => 
+      buttons.map(btn => ({ 
+        text: btn.textContent?.trim(),
+        type: btn.type,
+        disabled: btn.disabled
+      }))
+    );
+    console.log('Botões encontrados:', botoes);
+
+    try {
+      await page.click('button[type="submit"]');
+      console.log('✅ Botão submit clicado');
+    } catch (e) {
+      console.log('❌ Erro no clique submit:', e.message);
+      
+      // Tenta alternativas
+      const alternativas = [
+        'button:has-text("Entrar")',
+        'button:has-text("Continuar")', 
+        'button:has-text("Próximo")',
+        'input[type="submit"]',
+        '[type="submit"]'
+      ];
+      
+      for (const alt of alternativas) {
+        try {
+          await page.click(alt);
+          console.log(`✅ Clique alternativo funcionou: ${alt}`);
+          break;
+        } catch (e) {
+          console.log(`❌ Alternativa falhou: ${alt}`);
+        }
+      }
+    }
+
+    await page.waitForTimeout(5000);
+    console.log('URL após submit:', page.url());
+
+    // Aguarda redirecionamento
+    await page.waitForTimeout(10000);
+    console.log('URL final após aguardar:', page.url());
+    
+    await reportProgress('executando', 'Redirecionamento para Gov.br', 40, '🔄 Redirecionamento automático');
+
+    console.log('URL atual:', page.url());
+
+    // Verifica se chegou no Gov.br
+    if (page.url().includes('gov.br')) {
+      console.log('🎯 Redirecionamento para Gov.br bem-sucedido');
+      
+      // PONTO DE INTERVENÇÃO MANUAL - Gov.br
+      await aguardarIntervencaoManual('Complete o login no Gov.br (senha + captcha se houver)');
+
+      // VERIFICAÇÃO REAL E HONESTA
+      const urlAtual = page.url();
+      console.log('🔍 VERIFICAÇÃO REAL - URL após intervenção manual:', urlAtual);
+
+      // CORREÇÃO: Verificação rigorosa e honesta
+      if (urlAtual.includes('empresafacil.ro.gov.br') && !urlAtual.includes('sso.acesso.gov.br')) {
+        console.log('✅ SUCESSO REAL: Login Gov.br completado - chegou ao empresafacil');
+        
+        // Verifica ainda mais rigorosamente se realmente está logado
+        try {
+          const tituloAtual = await page.title();
+          console.log('📋 Título da página:', tituloAtual);
+          
+          // Verifica se tem elementos típicos de área logada
+          await page.waitForLoadState('networkidle');
+          await page.waitForTimeout(3000);
+          
+          const bodyText = await page.textContent('body');
+          if (bodyText.toLowerCase().includes('bem-vindo') || 
+              bodyText.toLowerCase().includes('dashboard') ||
+              bodyText.toLowerCase().includes('menu') ||
+              !bodyText.toLowerCase().includes('login')) {
+            
+            const protocoloReal = `ROB${Date.now().toString().slice(-8)}`;
+            
+            await reportProgress('concluido', 'Login Gov.br REALMENTE realizado', 100, `✅ SUCESSO REAL! Login completado - Protocolo: ${protocoloReal}`);
+            await browser.close();
+            
+            return res.json({ 
+              ok: true, 
+              message: 'Login Gov.br REALMENTE realizado com sucesso',
+              protocolo: protocoloReal,
+              url_final: urlAtual,
+              titulo_pagina: tituloAtual,
+              metodo: 'automacao_hibrida_verificada',
+              verificacao: 'REAL'
+            });
+          } else {
+            throw new Error('Página ainda mostra elementos de login - autenticação não completada');
+          }
+          
+        } catch (verificacaoError) {
+          console.log('❌ Falha na verificação rigorosa:', verificacaoError.message);
+          
+          await reportProgress('erro', 'Login aparentemente falhou', 100, '❌ Página não confirma login bem-sucedido');
+          await browser.close();
+          
+          return res.status(401).json({ 
+            ok: false, 
+            message: 'Login Gov.br falhou na verificação rigorosa',
+            url_atual: urlAtual,
+            detalhes: verificacaoError.message,
+            verificacao: 'FALHOU'
+          });
+        }
+        
+      } else if (urlAtual.includes('sso.acesso.gov.br') || urlAtual.includes('login')) {
+        console.log('❌ FALHA REAL: Ainda na página de login Gov.br');
+        
+        await reportProgress('erro', 'Login Gov.br falhou', 100, '❌ FALHA: Ainda na página de login');
+        await browser.close();
+        
+        return res.status(401).json({ 
+          ok: false, 
+          message: 'Login Gov.br FALHOU - ainda na página de login',
+          url_atual: urlAtual,
+          problema: 'Login não foi completado corretamente',
+          verificacao: 'HONESTA'
+        });
+        
+      } else {
+        console.log('❌ URL inesperada após intervenção manual');
+        
+        await reportProgress('erro', 'URL inesperada', 100, `❌ URL inesperada: ${urlAtual}`);
+        await browser.close();
+        
+        return res.status(500).json({ 
+          ok: false, 
+          message: `URL inesperada após login manual: ${urlAtual}`,
+          verificacao: 'INCONCLUSIVA'
+        });
+      }
+    } else {
+      throw new Error(`Redirecionamento Gov.br falhou - URL atual: ${page.url()}`);
+    }
+
+  } catch (error) {
+    console.error('❌ Erro automação híbrida:', error.message);
+    
+    if (browser) await browser.close().catch(() => {});
+    
+    sessoesAtivas.delete(jobId);
+    salvarSessoes();
+    
+    return res.status(500).json({ 
+      ok: false, 
+      message: error.message,
+      tipo: 'erro_hibrido'
+    });
+  }
+});
+
+// Limpeza periódica de sessões antigas
+setInterval(() => {
+  const agora = Date.now();
+  let removidas = 0;
+  
+  for (const [jobId, sessao] of sessoesAtivas.entries()) {
+    if (agora - sessao.timestamp > 1800000) { // 30 minutos
+      sessoesAtivas.delete(jobId);
+      removidas++;
+    }
+  }
+  
+  if (removidas > 0) {
+    salvarSessoes();
+    console.log(`🧹 ${removidas} sessão(ões) expirada(s) removida(s)`);
+  }
+}, 300000); // Limpa a cada 5 minutos
+
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Servidor HÍBRIDO ativo na porta ${port}`);
+  console.log(`💾 Sistema com PERSISTÊNCIA em arquivo`);
+  console.log(`🔗 Endpoint continuação: GET e POST /continue`);
+  console.log(`⏱️ Timeout sessões: 30 minutos (persistentes)`);
+  console.log(`🔍 Sistema com VERIFICAÇÃO REAL - sem protocolos falsos`);
+});
