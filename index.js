@@ -49,7 +49,8 @@ app.get('/', (req, res) => {
     timestamp: new Date().toISOString(),
     sessoes_ativas: sessoesAtivas.size,
     sessoes_persistentes: true,
-    location: 'Brasil - Render'
+    location: 'Brasil - Render',
+    versao: 'corrigida-status-200'
   });
 });
 
@@ -73,7 +74,7 @@ app.get('/continue', (req, res) => {
   });
 });
 
-// Endpoint POST para continuar automação após login manual
+// Endpoint POST para continuar automação - CORRIGIDO
 app.post('/continue', async (req, res) => {
   const { jobId } = req.body;
   
@@ -86,11 +87,13 @@ app.post('/continue', async (req, res) => {
   
   if (!sessoesAtivas.has(jobId)) {
     console.error(`❌ Sessão ${jobId} não encontrada`);
-    return res.status(404).json({ 
+    // CORREÇÃO: Retorna 200 em vez de 404
+    return res.status(200).json({ 
       ok: false, 
       message: `Sessão ${jobId} não encontrada ou expirou`,
       sessoesAtivas: Array.from(sessoesAtivas.keys()),
-      help: 'Execute novamente para gerar nova sessão'
+      help: 'Execute novamente para gerar nova sessão',
+      tipo: 'sessao_nao_encontrada'
     });
   }
   
@@ -102,7 +105,7 @@ app.post('/continue', async (req, res) => {
   
   console.log(`✅ Usuário sinalizou continuação para job ${jobId}`);
   
-  res.json({ 
+  res.status(200).json({ 
     ok: true, 
     message: 'Automação de formulários continuará...',
     jobId: jobId,
@@ -303,18 +306,19 @@ async function preencherFormularioConstituicao(page, dados, reportProgress) {
   }
 }
 
-// Automação híbrida melhorada
+// Automação híbrida otimizada
 app.post('/run', async (req, res) => {
-  console.log('🚀 Iniciando automação HÍBRIDA melhorada - Login manual + Automação formulários');
+  console.log('🚀 Iniciando automação HÍBRIDA otimizada - Login manual + Automação formulários');
   
   let browser = null;
   const { jobId, credenciais, dados, webhookUrl } = req.body;
   
   try {
     if (!credenciais?.cpf || !credenciais?.senha) {
-      return res.status(400).json({ 
+      return res.status(200).json({ 
         ok: false, 
-        message: 'Credenciais obrigatórias' 
+        message: 'Credenciais obrigatórias',
+        tipo: 'validacao_parametros'
       });
     }
 
@@ -377,7 +381,11 @@ app.post('/run', async (req, res) => {
     if (!sessao.continuarAutomacao) {
       sessoesAtivas.delete(jobId);
       salvarSessoes();
-      throw new Error('Timeout aguardando login manual (30 minutos)');
+      return res.status(200).json({
+        ok: false,
+        message: 'Timeout aguardando login manual (30 minutos)',
+        tipo: 'timeout'
+      });
     }
 
     console.log(`✅ Login manual sinalizado para job ${jobId} - Iniciando automação de formulários`);
@@ -415,7 +423,15 @@ app.post('/run', async (req, res) => {
     console.log('🔍 URL após acesso:', urlAtual);
     
     if (urlAtual.includes('login')) {
-      throw new Error('Usuário ainda não fez login - ainda na página de login');
+      await browser.close();
+      sessoesAtivas.delete(jobId);
+      salvarSessoes();
+      
+      return res.status(200).json({
+        ok: false,
+        message: 'Usuário ainda não fez login - ainda na página de login',
+        tipo: 'login_nao_completado'
+      });
     }
 
     // Executa preenchimento automático
@@ -428,7 +444,7 @@ app.post('/run', async (req, res) => {
     if (resultado.sucesso) {
       await reportProgress('concluido', 'Automação híbrida concluída', 100, `🎉 Processo finalizado! Protocolo: ${resultado.protocolo}`);
       
-      return res.json({ 
+      return res.status(200).json({ 
         ok: true, 
         message: 'Automação híbrida concluída com sucesso',
         protocolo: resultado.protocolo,
@@ -439,9 +455,10 @@ app.post('/run', async (req, res) => {
     } else {
       await reportProgress('erro', 'Falha na automação', 100, `❌ Falha: ${resultado.motivo}`);
       
-      return res.status(500).json({ 
+      return res.status(200).json({ 
         ok: false, 
-        message: resultado.motivo
+        message: resultado.motivo,
+        tipo: 'falha_automacao'
       });
     }
 
@@ -453,10 +470,10 @@ app.post('/run', async (req, res) => {
     sessoesAtivas.delete(jobId);
     salvarSessoes();
     
-    return res.status(500).json({ 
+    return res.status(200).json({ 
       ok: false, 
       message: error.message,
-      tipo: 'erro_hibrido_otimizado'
+      tipo: 'erro_geral'
     });
   }
 });
@@ -480,8 +497,9 @@ setInterval(() => {
 }, 300000); // Limpa a cada 5 minutos
 
 app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 Servidor HÍBRIDO OTIMIZADO ativo na porta ${port}`);
+  console.log(`🚀 Servidor HÍBRIDO CORRIGIDO ativo na porta ${port}`);
   console.log(`👤 Login manual + 🤖 Automação formulários`);
   console.log(`💾 Sistema com PERSISTÊNCIA em arquivo`);
   console.log(`⏱️ Timeout sessões: 30 minutos`);
+  console.log(`✅ Status 200 para todos os erros (sem 404)`);
 });
