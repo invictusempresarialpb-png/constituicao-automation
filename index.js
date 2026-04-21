@@ -45,7 +45,7 @@ const sessoesAtivas = carregarSessoes();
 // Health check
 app.get('/', (req, res) => {
   res.json({ 
-    status: 'Servidor híbrido ativo - Automação + Manual', 
+    status: 'Servidor híbrido ativo - Login manual + Automação formulários', 
     timestamp: new Date().toISOString(),
     sessoes_ativas: sessoesAtivas.size,
     sessoes_persistentes: true,
@@ -73,7 +73,7 @@ app.get('/continue', (req, res) => {
   });
 });
 
-// Endpoint POST para continuar automação após intervenção manual
+// Endpoint POST para continuar automação após login manual
 app.post('/continue', async (req, res) => {
   const { jobId } = req.body;
   
@@ -104,361 +104,130 @@ app.post('/continue', async (req, res) => {
   
   res.json({ 
     ok: true, 
-    message: 'Automação continuará em breve...',
+    message: 'Automação de formulários continuará...',
     jobId: jobId,
     timestamp: new Date().toISOString()
   });
 });
 
-// Automação híbrida Gov.br
-app.post('/run', async (req, res) => {
-  console.log('🚀 Iniciando automação HÍBRIDA Gov.br com IP brasileiro');
-  
-  let browser = null;
-  const { jobId, credenciais, webhookUrl } = req.body;
+// Função para preencher formulário de constituição
+async function preencherFormularioConstituicao(page, dados, reportProgress) {
+  console.log('🏢 Iniciando preenchimento do formulário de constituição');
   
   try {
-    if (!credenciais?.cpf || !credenciais?.senha) {
-      return res.status(400).json({ 
-        ok: false, 
-        message: 'Credenciais obrigatórias' 
-      });
-    }
-
-    // Função webhook
-    const reportProgress = async (status, etapa, progresso, logMessage) => {
-      const timestamp = new Date().toISOString().slice(11, 19);
-      const log = `[${timestamp}] ${logMessage || etapa}`;
-      console.log(log);
-      
-      if (webhookUrl) {
-        try {
-          await fetch(webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              jobId,
-              status,
-              etapa_atual: etapa,
-              progresso_percent: progresso,
-              log_append: log
-            })
-          });
-        } catch (e) {
-          console.error('Webhook erro:', e.message);
-        }
-      }
-    };
-
-    // Função para aguardar intervenção manual
-    const aguardarIntervencaoManual = async (mensagem, tempoLimite = 1800000) => { // 30 minutos
-      console.log(`⏸️ Aguardando intervenção manual: ${mensagem}`);
-      
-      const sessao = {
-        continuarAutomacao: false,
-        timestamp: Date.now(),
-        jobId: jobId
-      };
-      
-      sessoesAtivas.set(jobId, sessao);
-      salvarSessoes(); // Salva no arquivo imediatamente
-      
-      console.log(`💾 Sessão ${jobId} salva no arquivo. Total ativo: ${sessoesAtivas.size}`);
-      console.log(`⏰ Sessão válida por 30 minutos (persistente)`);
-      
-      await reportProgress('aguardando', 'Intervenção manual necessária', 50, 
-        `⏸️ ${mensagem} - Faça login manualmente e clique "Continuar Automação"`);
-      
-      const inicioEspera = Date.now();
-      
-      while (!sessao.continuarAutomacao && (Date.now() - inicioEspera) < tempoLimite) {
-        await new Promise(resolve => setTimeout(resolve, 5000)); // Verifica a cada 5s
-        
-        // Log periódico
-        if ((Date.now() - inicioEspera) % 60000 < 5000) { // A cada 60s
-          const tempoEspera = Math.floor((Date.now() - inicioEspera) / 1000);
-          console.log(`⏳ Aguardando continuação há ${tempoEspera}s para job ${jobId} (sessão persistente)`);
-        }
-      }
-      
-      if (!sessao.continuarAutomacao) {
-        sessoesAtivas.delete(jobId);
-        salvarSessoes();
-        throw new Error('Timeout na intervenção manual (30 minutos)');
-      }
-      
-      console.log(`✅ Intervenção manual concluída para job ${jobId}`);
-      sessoesAtivas.delete(jobId);
-      salvarSessoes();
-      
-      await reportProgress('executando', 'Continuando automação', 60, '✅ Login manual concluído, retomando automação...');
-    };
-
-    await reportProgress('executando', 'Iniciando browser brasileiro', 10, '🇧🇷 Iniciando navegador híbrido');
-
-    console.log(`Job ${jobId} - Lançando browser híbrido...`);
-
-    // Configuração Playwright
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-first-run'
-      ]
-    });
-
-    const context = await browser.newContext({
-      locale: 'pt-BR',
-      timezoneId: 'America/Sao_Paulo',
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    });
-
-    const page = await context.newPage();
-
-    await reportProgress('executando', 'Navegando para Empresa Fácil', 20, '📍 Acessando empresafacil.ro.gov.br');
-
-    await page.goto('https://www.empresafacil.ro.gov.br/s/login', { 
-      waitUntil: 'domcontentloaded',
-      timeout: 60000
-    });
-
-    await reportProgress('executando', 'Preenchendo CPF automaticamente', 30, '🤖 Automação: digitando CPF');
-
-    const cpfLimpo = credenciais.cpf.replace(/\D/g, '');
-    const cpfFormatado = cpfLimpo.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+    // Aguarda página carregar
+    await page.waitForLoadState('networkidle');
+    await page.waitForTimeout(3000);
     
-    // Busca campo CPF
-    const possiveisCamposCPF = [
-      'input[name="username"]',
-      'input[placeholder*="CPF"]', 
-      'input[id*="cpf"]',
-      'input[type="text"]'
+    await reportProgress('executando', 'Buscando formulário de constituição', 75, '🔍 Procurando área de constituição');
+    
+    // Captura título e URL para verificar onde estamos
+    const titulo = await page.title();
+    const url = page.url();
+    console.log('📍 Localização atual:', { titulo, url });
+    
+    // Procura links/botões para constituição
+    const opcosConstituicao = [
+      'text=constituição',
+      'text=constituir',
+      'text=nova empresa',
+      'text=abertura empresa',
+      'text=abertura',
+      '[href*="constituicao"]',
+      '[href*="abertura"]',
+      'text=registrar empresa'
     ];
-
-    let cpfInput = null;
-    for (const seletor of possiveisCamposCPF) {
+    
+    let acessouFormulario = false;
+    
+    for (const opcao of opcosConstituicao) {
       try {
-        cpfInput = page.locator(seletor).first();
-        await cpfInput.waitFor({ timeout: 10000 });
-        console.log(`✅ Campo CPF: ${seletor}`);
-        break;
+        const elemento = page.locator(opcao).first();
+        if (await elemento.isVisible()) {
+          console.log(`✅ Encontrado: ${opcao}`);
+          await elemento.click();
+          await page.waitForTimeout(3000);
+          acessouFormulario = true;
+          break;
+        }
       } catch (e) {
-        console.log(`❌ Seletor falhou: ${seletor}`);
+        console.log(`❌ Não encontrado: ${opcao}`);
       }
     }
-
-    if (!cpfInput) {
-      throw new Error('Campo CPF não encontrado na página');
-    }
-
-    await cpfInput.fill(cpfFormatado);
-    await page.waitForTimeout(2000);
-
-    console.log('🔍 Procurando botão de submit...');
-
-    // Debug: vê todos os botões da página
-    const botoes = await page.$$eval('button', buttons => 
-      buttons.map(btn => ({ 
-        text: btn.textContent?.trim(),
-        type: btn.type,
-        disabled: btn.disabled
-      }))
-    );
-    console.log('Botões encontrados:', botoes);
-
-    try {
-      await page.click('button[type="submit"]');
-      console.log('✅ Botão submit clicado');
-    } catch (e) {
-      console.log('❌ Erro no clique submit:', e.message);
+    
+    if (!acessouFormulario) {
+      // Tenta procurar em menus ou navegação
+      console.log('🔍 Procurando em navegação...');
       
-      // Tenta alternativas
-      const alternativas = [
-        'button:has-text("Entrar")',
-        'button:has-text("Continuar")', 
-        'button:has-text("Próximo")',
-        'input[type="submit"]',
-        '[type="submit"]'
+      const menuItems = await page.$$eval('a, button', elements => 
+        elements
+          .filter(el => el.offsetHeight > 0)
+          .map(el => ({ 
+            text: el.textContent?.trim().toLowerCase(),
+            href: el.href,
+            tag: el.tagName
+          }))
+          .filter(el => el.text && (
+            el.text.includes('constituição') ||
+            el.text.includes('constituir') ||
+            el.text.includes('nova empresa') ||
+            el.text.includes('abertura')
+          ))
+      );
+      
+      console.log('🔍 Opções de menu encontradas:', menuItems);
+      
+      if (menuItems.length > 0) {
+        // Tenta clicar no primeiro item relevante
+        const primeiraOpcao = menuItems[0];
+        console.log(`🎯 Tentando acessar: ${primeiraOpcao.text}`);
+        
+        if (primeiraOpcao.href) {
+          await page.goto(primeiraOpcao.href);
+        } else {
+          await page.click(`text=${primeiraOpcao.text}`);
+        }
+        
+        await page.waitForTimeout(5000);
+        acessouFormulario = true;
+      }
+    }
+    
+    if (acessouFormulario) {
+      await reportProgress('executando', 'Formulário localizado, preenchendo dados', 80, '📝 Preenchendo informações da empresa');
+      
+      // Aguarda formulário carregar
+      await page.waitForLoadState('networkidle');
+      await page.waitForTimeout(3000);
+      
+      // Procura campos comuns de formulários de constituição
+      const camposFormulario = [
+        { campo: 'razão social', seletores: ['input[name*="razao"], input[id*="razao"], input[placeholder*="razão"]'] },
+        { campo: 'nome fantasia', seletores: ['input[name*="fantasia"], input[id*="fantasia"], input[placeholder*="fantasia"]'] },
+        { campo: 'cnae', seletores: ['input[name*="cnae"], input[id*="cnae"], input[placeholder*="cnae"]'] },
+        { campo: 'capital', seletores: ['input[name*="capital"], input[id*="capital"], input[placeholder*="capital"]'] }
       ];
       
-      for (const alt of alternativas) {
-        try {
-          await page.click(alt);
-          console.log(`✅ Clique alternativo funcionou: ${alt}`);
-          break;
-        } catch (e) {
-          console.log(`❌ Alternativa falhou: ${alt}`);
-        }
-      }
-    }
-
-    await page.waitForTimeout(5000);
-    console.log('URL após submit:', page.url());
-
-    // Aguarda redirecionamento
-    await page.waitForTimeout(10000);
-    console.log('URL final após aguardar:', page.url());
-    
-    await reportProgress('executando', 'Redirecionamento para Gov.br', 40, '🔄 Redirecionamento automático');
-
-    console.log('URL atual:', page.url());
-
-    // Verifica se chegou no Gov.br
-    if (page.url().includes('gov.br')) {
-      console.log('🎯 Redirecionamento para Gov.br bem-sucedido');
+      let camposPreenchidos = 0;
       
-      // PONTO DE INTERVENÇÃO MANUAL - Gov.br
-      await aguardarIntervencaoManual('Complete o login no Gov.br (senha + captcha se houver)');
-
-      // DIAGNÓSTICO DETALHADO
-      console.log('🔍 INICIANDO DIAGNÓSTICO DETALHADO DO LOGIN');
-
-      // 1. Captura estado da página
-      const tituloAntes = await page.title();
-      const urlAntes = page.url();
-      console.log('📋 Estado antes:', { titulo: tituloAntes, url: urlAntes });
-
-      // 2. Verifica elementos de login na página
-      try {
-        const elementosLogin = await page.$$eval('input, button', elements => 
-          elements.map(el => ({ 
-            tag: el.tagName.toLowerCase(),
-            type: el.type,
-            name: el.name,
-            id: el.id,
-            placeholder: el.placeholder,
-            value: el.value,
-            text: el.textContent?.trim(),
-            visible: el.offsetHeight > 0
-          })).filter(el => el.visible)
-        );
-        console.log('🔍 Elementos visíveis na página:', elementosLogin);
-      } catch (e) {
-        console.log('❌ Erro capturando elementos:', e.message);
-      }
-
-      // 3. Aguarda possíveis redirecionamentos automáticos
-      console.log('⏳ Aguardando possíveis redirecionamentos automáticos...');
-      await page.waitForTimeout(10000);
-
-      const urlAposEspera = page.url();
-      console.log('🔄 URL após espera:', urlAposEspera);
-
-      // 4. Se ainda em login, tenta detectar erros na página
-      if (urlAposEspera.includes('login')) {
-        try {
-          const erros = await page.$$eval('[class*="erro"], [class*="error"], .alert', erros => 
-            erros.map(erro => erro.textContent?.trim()).filter(Boolean)
-          );
-          if (erros.length > 0) {
-            console.log('⚠️ Mensagens de erro encontradas:', erros);
-          }
-        } catch (e) {
-          console.log('📝 Nenhuma mensagem de erro específica encontrada');
-        }
-      }
-
-      // 5. Verifica se houve mudança após intervenção
-      if (urlAntes !== urlAposEspera) {
-        console.log('✅ Houve mudança na URL após intervenção manual');
-      } else {
-        console.log('❌ Nenhuma mudança na URL - login pode não ter sido tentado');
-      }
-
-      console.log('🔍 FIM DO DIAGNÓSTICO DETALHADO');
-
-      // VERIFICAÇÃO REAL E HONESTA
-      const urlAtual = page.url();
-      console.log('🔍 VERIFICAÇÃO REAL - URL após diagnóstico:', urlAtual);
-
-      // CORREÇÃO: Verificação rigorosa e honesta
-      if (urlAtual.includes('empresafacil.ro.gov.br') && !urlAtual.includes('sso.acesso.gov.br')) {
-        console.log('✅ SUCESSO REAL: Login Gov.br completado - chegou ao empresafacil');
-        
-        const protocoloReal = `ROB${Date.now().toString().slice(-8)}`;
-        
-        await reportProgress('concluido', 'Login Gov.br REALMENTE realizado', 100, `✅ SUCESSO REAL! Login completado - Protocolo: ${protocoloReal}`);
-        await browser.close();
-        
-        return res.json({ 
-          ok: true, 
-          message: 'Login Gov.br REALMENTE realizado com sucesso',
-          protocolo: protocoloReal,
-          url_final: urlAtual,
-          verificacao: 'REAL'
-        });
-        
-      } else if (urlAtual.includes('sso.acesso.gov.br') || urlAtual.includes('login')) {
-        console.log('❌ FALHA REAL: Ainda na página de login Gov.br');
-        
-        await reportProgress('erro', 'Login Gov.br falhou', 100, '❌ FALHA: Ainda na página de login');
-        await browser.close();
-        
-        return res.status(401).json({ 
-          ok: false, 
-          message: 'Login Gov.br FALHOU - ainda na página de login',
-          url_atual: urlAtual,
-          problema: 'Login não foi completado corretamente',
-          verificacao: 'HONESTA'
-        });
-        
-      } else {
-        console.log('❌ URL inesperada após intervenção manual');
-        
-        await reportProgress('erro', 'URL inesperada', 100, `❌ URL inesperada: ${urlAtual}`);
-        await browser.close();
-        
-        return res.status(500).json({ 
-          ok: false, 
-          message: `URL inesperada após login manual: ${urlAtual}`,
-          verificacao: 'INCONCLUSIVA'
-        });
-      }
-    } else {
-      throw new Error(`Redirecionamento Gov.br falhou - URL atual: ${page.url()}`);
-    }
-
-  } catch (error) {
-    console.error('❌ Erro automação híbrida:', error.message);
-    
-    if (browser) await browser.close().catch(() => {});
-    
-    sessoesAtivas.delete(jobId);
-    salvarSessoes();
-    
-    return res.status(500).json({ 
-      ok: false, 
-      message: error.message,
-      tipo: 'erro_hibrido'
-    });
-  }
-});
-
-// Limpeza periódica de sessões antigas
-setInterval(() => {
-  const agora = Date.now();
-  let removidas = 0;
-  
-  for (const [jobId, sessao] of sessoesAtivas.entries()) {
-    if (agora - sessao.timestamp > 1800000) { // 30 minutos
-      sessoesAtivas.delete(jobId);
-      removidas++;
-    }
-  }
-  
-  if (removidas > 0) {
-    salvarSessoes();
-    console.log(`🧹 ${removidas} sessão(ões) expirada(s) removida(s)`);
-  }
-}, 300000); // Limpa a cada 5 minutos
-
-app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 Servidor HÍBRIDO ativo na porta ${port}`);
-  console.log(`💾 Sistema com PERSISTÊNCIA em arquivo`);
-  console.log(`🔗 Endpoint continuação: GET e POST /continue`);
-  console.log(`⏱️ Timeout sessões: 30 minutos (persistentes)`);
-  console.log(`🔍 Sistema com VERIFICAÇÃO REAL + DIAGNÓSTICO DETALHADO`);
-});
+      for (const { campo, seletores } of camposFormulario) {
+        for (const seletor of seletores) {
+          try {
+            const input = page.locator(seletor).first();
+            if (await input.isVisible()) {
+              console.log(`✅ Preenchendo ${campo}`);
+              
+              // Dados fictícios para teste (em produção viria do parâmetro 'dados')
+              let valor = '';
+              switch (campo) {
+                case 'razão social':
+                  valor = 'EMPRESA TESTE LTDA';
+                  break;
+                case 'nome fantasia':
+                  valor = 'Empresa Teste';
+                  break;
+                case 'cnae':
+                  valor = '6201-5/00';
+                  break;
+                case 'capital':
+                  valor = '10000'
